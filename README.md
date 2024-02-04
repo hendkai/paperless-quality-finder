@@ -1,0 +1,1 @@
+# paperless-quality-finder
