@@ -26,10 +26,10 @@ To get started, follow these steps:
 2. Install the required Python packages:
 
    ```bash
-   pip install -r requirements.txt
+   pip install tqdm
    ```
 
-3. Configure the script by editing the `config.py` file.
+3. Configure the script by editing the config section.
 
 4. Run the script:
 
@@ -41,7 +41,7 @@ To get started, follow these steps:
 
 ## Configuration
 
-In the `config.py` file, you can configure the following settings:
+In the `main.py` file, you can configure the following settings:
 
 - `API_URL`: The URL of your Paperless NG or Paperless-NGX instance.
 - `API_TOKEN`: Your API token for authentication.
