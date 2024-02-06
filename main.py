@@ -1,95 +1,123 @@
 import requests
+import re
 from tqdm import tqdm
 
-# Konfiguration
+# Configuration
 API_URL = 'http://yourpaperlessserver:port/api'
 API_TOKEN = 'YOURPAPERLESSAPITOKEN'
-LIMIT = 20  # Limit der Dokumente pro Anfrage
-SEARCH_QUERY = 'Entgelt'  # Suchanfrage
+LIMIT = 1  # Limit of documents per request
+SEARCH_QUERY = 'Entgelt'  # Search query
+VALID_PERCENTAGE_THRESHOLD = 50.0  # Adjust the threshold as needed
 
-# Lade die Wortliste
-with open('german.dic', 'r', encoding='iso-8859-1') as file:
-    valid_words = set(word.strip().lower() for word in file.readlines())
+def load_word_list(file_path):
+    with open(file_path, 'r', encoding='iso-8859-1') as file:
+        total_lines = sum(1 for line in file)
+        file.seek(0)  # Reset the file pointer to the beginning
+        valid_words = set(tqdm((word.strip().lower() for word in file), total=total_lines, desc="Loading word list"))
+    return valid_words
+
+valid_words = load_word_list('german.dic')
 
 def fetch_all_tags():
     headers = {'Authorization': f'Token {API_TOKEN}'}
     response = requests.get(f'{API_URL}/tags/', headers=headers)
-    if response.status_code == 200:
-        return response.json()['results']
-    else:
-        print(f"Fehler beim Abrufen der Tags, Statuscode: {response.status_code}")
-        return []
+    return response.json()['results'] if response.status_code == 200 else []
 
 def select_tag(tags):
-    print("Verfügbare Tags:")
+    print("Available tags:")
     for tag in tags:
         print(f"ID: {tag['id']}, Name: {tag['name']}")
-    tag_id = int(input("Bitte geben Sie die ID des Tags ein, den Sie verwenden möchten: "))
+    tag_id = int(input("Please enter the ID of the tag you want to use: "))
     return tag_id
 
 def get_document_content(document_id):
     headers = {'Authorization': f'Token {API_TOKEN}'}
-    response = requests.get(f'{API_URL}/documents/{document_id}/text/', headers=headers)
-    if response.status_code == 200:
-        try:
-            content = response.json().get('text', '')
-            return content
-        except ValueError:
-            print(f"Kein JSON-Inhalt gefunden für Dokument {document_id}. Möglicherweise ist der Textinhalt leer.")
-            return ""
-    else:
-        print(f"Fehler beim Abrufen des Inhalts für Dokument {document_id}, Statuscode: {response.status_code}")
-        return ""
-
-def is_content_valid(content, valid_words):
-    words = content.lower().split()
-    total_word_count = len(words)
-    valid_word_count = sum(1 for word in words if word in valid_words)
-    
-    # Das Dokument soll getaggt werden, wenn mehr als 50% der Wörter ungültig sind
-    return valid_word_count / total_word_count < 0.5 if total_word_count > 0 else False
-
-def tag_document_as_low_quality(document_id, tag_id):
-    headers = {'Authorization': f'Token {API_TOKEN}', 'Content-Type': 'application/json'}
-    data = {"tags": [tag_id]}
-    response = requests.patch(f'{API_URL}/documents/{document_id}/', json=data, headers=headers)
-    if response.status_code != 200:
-        print(f"Fehler beim Taggen des Dokuments {document_id}, Statuscode: {response.status_code}")
-
-def get_documents(page, search_query):
-    headers = {'Authorization': f'Token {API_TOKEN}'}
-    params = {'limit': LIMIT, 'offset': (page - 1) * LIMIT, 'query': search_query}
-    response = requests.get(f'{API_URL}/documents/', headers=headers, params=params, timeout=30)
+    url = f'{API_URL}/documents/{document_id}/'
+    response = requests.get(url, headers=headers)
     if response.status_code == 200:
         data = response.json()
-        print(f"Seite {page} erfolgreich abgerufen, {len(data['results'])} Dokumente gefunden.")
-        return data['results']
+        content = data.get('content', '')
+        tags = data.get('tags', [])
+        return content, tags, None if content else "No content available"
     else:
-        print(f"Fehler beim Abrufen der Dokumente, Statuscode: {response.status_code}")
-        return []
+        return "", [], f"Error fetching content for document {document_id}, status code: {response.status_code}"
 
+# Check if the document content is valid based on the word list
+def is_content_valid(content, valid_words):
+    if not content:
+        return False, 0.0  # Content is empty
+
+    # Split the content into words and remove punctuation and whitespace
+    words = re.findall(r'\b\w+\b', content.lower())
+
+    # Calculate the percentage of valid words
+    total_words = len(words)
+    valid_count = sum(1 for word in words if word in valid_words)
+    valid_percentage = (valid_count / total_words) * 100 if total_words > 0 else 0.0
+
+    # Determine if the content is valid based on the percentage threshold
+    is_valid = valid_percentage >= VALID_PERCENTAGE_THRESHOLD
+
+    return is_valid, valid_percentage
+
+# Tag a document as low quality if it doesn't meet the criteria
+def tag_document_as_low_quality(document_id, tag_id, existing_tags):
+    if tag_id in existing_tags:
+        print(f"Document {document_id} already has the selected tag.")
+        return
+    headers = {'Authorization': f'Token {API_TOKEN}', 'Content-Type': 'application/json'}
+    data = {"tags": existing_tags + [tag_id]}
+    response = requests.patch(f'{API_URL}/documents/{document_id}/', json=data, headers=headers)
+    if response.status_code == 200:
+        original_file_name = response.json().get('original_file_name', 'N/A')
+        print(f"Document {document_id} ({original_file_name}) is matched and tagged.")
+    else:
+        print(f"Failed to tag document {document_id} as 'low quality'.")
+
+def get_documents(offset, search_query):
+    headers = {'Authorization': f'Token {API_TOKEN}'}
+    params = {'limit': LIMIT, 'offset': offset, 'query': search_query}
+    response = requests.get(f'{API_URL}/documents/', headers=headers, params=params)
+    if response.status_code == 200:
+        data = response.json()
+        return data['results'], data.get('next')
+    else:
+        print(f"Error fetching documents, status code: {response.status_code}")
+        return [], None
+
+# Process documents and tag them if they don't meet the criteria
 def process_documents(tag_id, valid_words):
-    page = 1
-    while True:
-        documents = get_documents(page, SEARCH_QUERY)
-        if not documents:
-            print("Keine weiteren Dokumente zum Analysieren gefunden.")
-            break
-        for doc in tqdm(documents, desc=f"Seite {page} verarbeiten"):
-            doc_id = doc["id"]
-            content = get_document_content(doc_id)
-            if not is_content_valid(content, valid_words):
-                tag_document_as_low_quality(doc_id, tag_id)
-        page += 1
+    offset = 0  # Start at the beginning
+    more_documents = True  # Flag to keep the loop running
+
+    while more_documents:
+        documents, next_offset = get_documents(offset, SEARCH_QUERY)
+        if documents:
+            for doc in documents:
+                document_id = doc["id"]
+                content, existing_tags, error_message = get_document_content(document_id)
+                if error_message:
+                    print(error_message)  # Display error message
+                    continue  # Skip to the next document
+                is_valid, valid_percentage = is_content_valid(content, valid_words)
+                if not is_valid:
+                    tag_document_as_low_quality(document_id, tag_id, existing_tags)
+                else:
+                    # Get the original file name and print it
+                    original_file_name = doc.get('original_file_name', 'N/A')
+                    print(f"Document {document_id} ({original_file_name}) is matched and tagged.")
+            offset += len(documents)  # Update offset based on the number of documents processed
+        else:
+            more_documents = False  # Stop the loop if no documents are returned
 
 def main():
     tags = fetch_all_tags()
     if tags:
         tag_id = select_tag(tags)
-        print(f"Sie haben den Tag mit der ID {tag_id} ausgewählt.")
+        print(f"You have selected tag with ID {tag_id}.")
         process_documents(tag_id, valid_words)
     else:
-        print("Keine Tags verfügbar.")
+        print("No tags available.")
 
 if __name__ == '__main__':
     main()
